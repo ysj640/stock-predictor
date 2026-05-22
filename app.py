@@ -39,6 +39,47 @@ _POPULAR_KRX = {
     "롯데케미칼":("011170","KOSPI"),"KT":("030200","KOSPI"),
     "현대중공업":("329180","KOSPI"),"삼성중공업":("010140","KOSPI"),
     "대한항공":("003490","KOSPI"),"아모레퍼시픽":("090430","KOSPI"),
+    # 추가
+    "현대로템":("064350","KOSPI"),"한화오션":("042660","KOSPI"),
+    "HD현대":("267250","KOSPI"),"삼성전기":("009150","KOSPI"),
+    "LG디스플레이":("034220","KOSPI"),"기업은행":("024110","KOSPI"),
+    "우리금융지주":("316140","KOSPI"),"한국항공우주":("047810","KOSPI"),
+    "현대글로비스":("086280","KOSPI"),"두산밥캣":("241560","KOSPI"),
+    "HD현대일렉트릭":("267260","KOSPI"),"LS일렉트릭":("010120","KOSPI"),
+    "메리츠금융지주":("138040","KOSPI"),"삼성생명":("032830","KOSPI"),
+    "SK바이오팜":("326030","KOSPI"),"카카오게임즈":("293490","KOSDAQ"),
+    "펄어비스":("263750","KOSDAQ"),"컴투스":("078340","KOSDAQ"),
+    "위메이드":("112040","KOSDAQ"),"더블유게임즈":("192080","KOSDAQ"),
+    "롯데웰푸드":("280360","KOSPI"),"오리온":("271560","KOSPI"),
+    "CJ제일제당":("097950","KOSPI"),"농심":("004370","KOSPI"),
+    "현대해상":("001450","KOSPI"),"삼성화재":("000810","KOSPI"),
+}
+
+# 한글 미국 주식명 → 티커 매핑
+_KO_US_MAP = {
+    "애플":("AAPL","Apple"),"테슬라":("TSLA","Tesla"),
+    "구글":("GOOGL","Alphabet"),"알파벳":("GOOGL","Alphabet"),
+    "마이크로소프트":("MSFT","Microsoft"),"MS":("MSFT","Microsoft"),
+    "아마존":("AMZN","Amazon"),"메타":("META","Meta"),
+    "페이스북":("META","Meta"),"엔비디아":("NVDA","NVIDIA"),
+    "넷플릭스":("NFLX","Netflix"),"인텔":("INTC","Intel"),
+    "퀄컴":("QCOM","Qualcomm"),"버크셔":("BRK-B","Berkshire Hathaway"),
+    "JP모건":("JPM","JPMorgan"),"골드만삭스":("GS","Goldman Sachs"),
+    "존슨앤존슨":("JNJ","Johnson & Johnson"),"화이자":("PFE","Pfizer"),
+    "코카콜라":("KO","Coca-Cola"),"맥도날드":("MCD","McDonald's"),
+    "나이키":("NKE","Nike"),"스타벅스":("SBUX","Starbucks"),
+    "보잉":("BA","Boeing"),"팔란티어":("PLTR","Palantir"),
+    "우버":("UBER","Uber"),"에어비앤비":("ABNB","Airbnb"),
+    "스포티파이":("SPOT","Spotify"),"줌":("ZM","Zoom"),
+    "페이팔":("PYPL","PayPal"),"코인베이스":("COIN","Coinbase"),
+    "리비안":("RIVN","Rivian"),"루시드":("LCID","Lucid"),
+    "AMD":("AMD","AMD"),"ARM":("ARM","ARM Holdings"),
+    "브로드컴":("AVGO","Broadcom"),"TSMC":("TSM","TSMC"),
+    "일라이릴리":("LLY","Eli Lilly"),"버텍스":("VRTX","Vertex"),
+    "모더나":("MRNA","Moderna"),"바이오엔텍":("BNTX","BioNTech"),
+    "스페이스엑스":("SPCE","Virgin Galactic"),"로켓랩":("RKLB","Rocket Lab"),
+    "엑슨모빌":("XOM","ExxonMobil"),"셰브론":("CVX","Chevron"),
+    "비자":("V","Visa"),"마스터카드":("MA","Mastercard"),
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -224,17 +265,35 @@ def search_krx(q):
 def search_stocks(query, market_choice):
     import yfinance as yf
     q=query.strip(); korean=_has_korean(q); results=[]
-    if market_choice in ["자동 감지","한국 (KRX)"] and (korean or (q.isdigit() and len(q)==6)):
-        results+=search_krx(q)
-    if not korean or market_choice in ["자동 감지","미국 (NYSE/NASDAQ)"]:
+
+    # 한글 → 미국 주식 매핑 확인
+    us_from_ko = None
+    if korean:
+        for ko,(ticker,en_name) in _KO_US_MAP.items():
+            if q in ko or ko in q or q==ko:
+                us_from_ko = (ticker, en_name); break
+
+    # KRX 검색: 한글이고 미국 매핑이 없는 경우, 또는 숫자 6자리
+    if market_choice in ["자동 감지","한국 (KRX)"]:
+        if (korean and not us_from_ko) or (q.isdigit() and len(q)==6):
+            results += search_krx(q)
+
+    # 미국 주식 검색: 영문 입력 또는 한글 미국주식명 또는 미국 선택
+    search_q = us_from_ko[0] if us_from_ko else q
+    if not korean or us_from_ko or market_choice == "미국 (NYSE/NASDAQ)":
+        # 한글 미국주식 매핑인 경우 바로 결과 추가
+        if us_from_ko and market_choice != "한국 (KRX)":
+            ticker, en_name = us_from_ko
+            results.append({"display":f"{en_name} ({ticker}) · 🇺🇸 미국",
+                            "name":en_name,"ticker":ticker,"market":"US"})
         try:
-            for item in yf.Search(q,max_results=12,news_count=0).quotes:
+            for item in yf.Search(search_q,max_results=12,news_count=0).quotes:
                 if item.get("quoteType")!="EQUITY": continue
                 sym=item.get("symbol",""); name=item.get("longname") or item.get("shortname") or sym
                 is_kr=sym.endswith(".KS") or sym.endswith(".KQ")
                 if market_choice=="한국 (KRX)" and not is_kr: continue
                 if market_choice=="미국 (NYSE/NASDAQ)" and is_kr: continue
-                if is_kr and any(r["ticker"]==sym for r in results): continue
+                if any(r["ticker"]==sym for r in results): continue
                 mkt="KRX" if is_kr else "US"; lbl="🇰🇷 한국" if is_kr else "🇺🇸 미국"
                 results.append({"display":f"{name} ({sym}) · {lbl}","name":name,"ticker":sym,"market":mkt})
         except Exception: pass
