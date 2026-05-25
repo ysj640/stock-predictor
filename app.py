@@ -501,6 +501,79 @@ def find_in_berkshire(ticker, company_name, holdings):
         if any(w in hn for w in nm.split() if len(w)>3): return h
     return None
 
+# ─────────────────────────────────────────────────────────────────
+# 국내 증권사 리서치 & 컨센서스
+# ─────────────────────────────────────────────────────────────────
+_KR_BROKERS = {
+    "키움증권":   ["키움","Kiwoom","Kiwoom Securities"],
+    "미래에셋증권": ["미래에셋","Mirae Asset","Mirae"],
+    "한국투자증권": ["한국투자","Korea Investment","KIS","Korea Invest"],
+}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_kr_broker_opinion(ticker):
+    import yfinance as yf, requests
+    out = {"consensus":{}, "target":{}, "reports":[], "all_recs":[]}
+    code = ticker.replace(".KS","").replace(".KQ","")
+    is_kr = code.isdigit()
+
+    # ── 1. yfinance 컨센서스 & 목표주가
+    try:
+        t = yf.Ticker(ticker)
+        summ = t.recommendations_summary
+        if summ is not None and not summ.empty:
+            r = summ.iloc[0]
+            sb,b,h,s,ss = (int(r.get(k,0)) for k in ["strongBuy","buy","hold","sell","strongSell"])
+            total = sb+b+h+s+ss
+            if total > 0:
+                out["consensus"] = {"strongBuy":sb,"buy":b,"hold":h,"sell":s,"strongSell":ss,"total":total}
+        try:
+            pt = t.analyst_price_targets
+            if pt: out["target"] = {k:pt.get(k) for k in ["mean","high","low","current"]}
+        except: pass
+        # 개별 의견
+        recs = t.recommendations
+        if recs is not None and not recs.empty:
+            for idx, row in recs.tail(20).iterrows():
+                firm = str(row.get("Firm",""))
+                matched = next((bn for bn,als in _KR_BROKERS.items()
+                                if any(a.lower() in firm.lower() for a in als)), None)
+                out["all_recs"].append({
+                    "date": str(idx)[:10], "firm": firm,
+                    "grade": str(row.get("To Grade","")),
+                    "action": str(row.get("Action","")),
+                    "broker": matched,
+                })
+    except Exception: pass
+
+    # ── 2. 네이버 금융 리서치 리포트 (한국 주식만)
+    if is_kr:
+        try:
+            url = f"https://m.stock.naver.com/api/research/reportList?symbol={code}&pageSize=20&page=1&type=company"
+            resp = requests.get(url, timeout=8, headers={"User-Agent":"Mozilla/5.0"})
+            if resp.status_code == 200:
+                items = resp.json().get("list") or resp.json().get("reportList") or []
+                if not items and isinstance(resp.json(), list):
+                    items = resp.json()
+                for item in items:
+                    broker_name = (item.get("brokerName") or item.get("publisher") or
+                                   item.get("company") or item.get("securitiesName") or "")
+                    title    = item.get("title") or item.get("reportName") or ""
+                    opinion  = item.get("opinion") or item.get("investOpinion") or ""
+                    tp_raw   = item.get("targetPrice") or item.get("goalPrice") or ""
+                    date_str = (item.get("date") or item.get("createDate") or "")[:10]
+                    try: tp = float(str(tp_raw).replace(",",""))
+                    except: tp = None
+                    matched = next((bn for bn,als in _KR_BROKERS.items()
+                                    if any(a in broker_name for a in als)), None)
+                    out["reports"].append({
+                        "date": date_str, "broker": broker_name,
+                        "title": title, "opinion": opinion,
+                        "target_price": tp, "matched": matched,
+                    })
+        except Exception: pass
+    return out
+
 IDX_LABELS={"SP500":"S&P 500","NASDAQ":"NASDAQ","KOSPI":"KOSPI","DJI":"Dow Jones"}
 IDX_COLORS={"SP500":"#E74C3C","NASDAQ":"#27AE60","KOSPI":"#F39C12","DJI":"#8E44AD"}
 WEEKDAY_KO={0:"월",1:"화",2:"수",3:"목",4:"금"}
@@ -766,6 +839,84 @@ if page == "📈 주가 분석":
                 st.caption(f"출처: SEC EDGAR 13F-HR | 기준일: {brk_filed} | 분기별 자동 갱신")
             else:
                 st.warning("버크셔 포트폴리오 데이터를 불러올 수 없습니다. (SEC EDGAR 일시 불가)")
+
+            # ── 국내 증권사 리서치 & 컨센서스
+            is_kr_stock = ticker.endswith(".KS") or ticker.endswith(".KQ")
+            st.subheader("🏢 증권사 리서치 & 컨센서스")
+            with st.spinner("증권사 의견 조회 중…"):
+                kr_data = fetch_kr_broker_opinion(ticker)
+
+            cons = kr_data.get("consensus", {})
+            tgt  = kr_data.get("target", {})
+            rpts = kr_data.get("reports", [])
+            arec = kr_data.get("all_recs", [])
+
+            if cons:
+                total = cons["total"]
+                pos = cons["strongBuy"] + cons["buy"]
+                neg = cons["sell"]      + cons["strongSell"]
+                neu = cons["hold"]
+                # 컨센서스 점수 → 예측 보정 (최대 ±2%)
+                cons_score = (pos - neg) / total
+                cons_boost = 1.0 + cons_score * 0.02
+                future_fc = future_fc.copy()
+                future_fc["yhat"]       *= cons_boost
+                future_fc["yhat_lower"] *= cons_boost
+                future_fc["yhat_upper"] *= cons_boost
+
+                st.markdown(f"**전체 애널리스트 {total}명 의견** — "
+                            f"매수 {pos}명 · 보유 {neu}명 · 매도 {neg}명  \n"
+                            f"컨센서스 예측 보정: **{(cons_boost-1)*100:+.1f}%**")
+                # 시각화 바
+                bar_html = (
+                    f"<div style='display:flex;height:18px;border-radius:4px;overflow:hidden;margin:4px 0'>"
+                    f"<div style='width:{pos/total*100:.0f}%;background:#27AE60'></div>"
+                    f"<div style='width:{neu/total*100:.0f}%;background:#F39C12'></div>"
+                    f"<div style='width:{neg/total*100:.0f}%;background:#E74C3C'></div>"
+                    f"</div><small style='color:gray'>🟢매수 {pos/total*100:.0f}% &nbsp; 🟡보유 {neu/total*100:.0f}% &nbsp; 🔴매도 {neg/total*100:.0f}%</small>"
+                )
+                st.markdown(bar_html, unsafe_allow_html=True)
+
+            if tgt and tgt.get("mean"):
+                cur = tgt.get("current") or latest
+                mean_tp = tgt["mean"]
+                upside = (mean_tp - cur) / cur * 100 if cur else 0
+                t1, t2, t3 = st.columns(3)
+                t1.metric("평균 목표주가", f"{mean_tp:,.2f}", f"{upside:+.1f}% 상승여력")
+                t2.metric("최고 목표주가", f"{tgt.get('high','-'):,.2f}" if tgt.get("high") else "-")
+                t3.metric("최저 목표주가", f"{tgt.get('low','-'):,.2f}" if tgt.get("low") else "-")
+
+            # 3사 리서치 리포트 (한국 주식)
+            if is_kr_stock:
+                st.markdown("**📋 키움·미래에셋·한국투자증권 리서치 리포트**")
+                target_rpts = [r for r in rpts if r.get("matched")]
+                other_rpts  = [r for r in rpts if not r.get("matched")]
+
+                if target_rpts:
+                    for r in target_rpts[:10]:
+                        op_icon = "📈" if "매수" in r["opinion"] or "Buy" in r["opinion"] else (
+                                  "📉" if "매도" in r["opinion"] or "Sell" in r["opinion"] else "➖")
+                        tp_str = f" | 목표주가: **{r['target_price']:,.0f}**" if r.get("target_price") else ""
+                        st.markdown(f"{op_icon} `{r['date']}` **{r['matched']}** — {r['opinion']}{tp_str}  \n"
+                                    f"&nbsp;&nbsp;&nbsp;&nbsp;{r['title']}")
+                else:
+                    st.info("3개 증권사의 최근 리포트를 찾지 못했습니다.")
+                    if other_rpts:
+                        st.markdown("*다른 증권사 최근 리포트:*")
+                        for r in other_rpts[:5]:
+                            tp_str = f" · 목표주가 {r['target_price']:,.0f}" if r.get("target_price") else ""
+                            st.markdown(f"▸ `{r['date']}` {r['broker']} — {r['opinion']}{tp_str} / {r['title']}")
+
+            elif arec:
+                # 미국 주식: yfinance 개별 의견
+                st.markdown("**📋 최근 애널리스트 의견**")
+                for r in arec[:8]:
+                    icon = "📈" if "buy" in r["grade"].lower() else ("📉" if "sell" in r["grade"].lower() else "➖")
+                    broker_tag = f" (**{r['broker']}**)" if r.get("broker") else ""
+                    st.markdown(f"{icon} `{r['date']}` {r['firm']}{broker_tag} — {r['grade']}")
+
+            if not cons and not rpts and not arec:
+                st.info("이 종목의 증권사 데이터를 찾을 수 없습니다.")
 
             # ── 예측 저장 버튼 (버튼 조건 밖에 위치 → 클릭 시 정상 실행됨)
             st.divider()
