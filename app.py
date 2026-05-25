@@ -189,17 +189,25 @@ with st.sidebar:
         if _sb_preds:
             st.subheader("📋 저장된 예측")
             _sb_sorted = sorted(_sb_preds, key=lambda x: x["saved_at"], reverse=True)
-            _sb_sel = st.radio(
-                "예측 목록",
-                range(len(_sb_sorted)),
-                format_func=lambda i: (
-                    f"📅 {_sb_sorted[i]['saved_at'][:10]}\n"
-                    f"  {_sb_sorted[i]['company']}"
-                ),
-                label_visibility="collapsed",
-                key="_sb_pred_radio",
-            )
-            st.session_state["_pred_sel_idx"] = _sb_sel
+            # 날짜별 그룹핑
+            _date_groups = {}
+            for _i, _p in enumerate(_sb_sorted):
+                _d = _p["saved_at"][:10]
+                _date_groups.setdefault(_d, []).append((_i, _p))
+            _sel_idx = st.session_state.get("_pred_sel_idx", 0)
+            for _date in sorted(_date_groups.keys(), reverse=True):
+                _grp = _date_groups[_date]
+                _has_sel = any(_i == _sel_idx for _i, _ in _grp)
+                with st.expander(f"📁 {_date}  ({len(_grp)}개)", expanded=_has_sel):
+                    for _idx, _p in _grp:
+                        _is_sel = _idx == _sel_idx
+                        if st.button(
+                            _p["company"],
+                            key=f"pb_{_p['id']}",
+                            use_container_width=True,
+                            type="primary" if _is_sel else "secondary",
+                        ):
+                            st.session_state["_pred_sel_idx"] = _idx
         else:
             st.info("저장된 예측 없음")
 
