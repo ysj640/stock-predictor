@@ -423,6 +423,84 @@ def fetch_news(ticker):
     except Exception:
         return []
 
+# ─────────────────────────────────────────────────────────────────
+# 버크셔 해서웨이 포트폴리오 (SEC EDGAR 13F)
+# ─────────────────────────────────────────────────────────────────
+_BRK_NAME_MAP = {
+    "APPLE":"AAPL","BANK OF AMERICA":"BAC","AMERICAN EXPRESS":"AXP",
+    "COCA-COLA":"KO","CHEVRON":"CVX","OCCIDENTAL":"OXY","MOODY":"MCO",
+    "KRAFT HEINZ":"KHC","DAVITA":"DVA","VERISIGN":"VRSN","AMAZON":"AMZN",
+    "T-MOBILE":"TMUS","BANK OF NEW YORK":"BK","US BANCORP":"USB",
+    "CITIGROUP":"C","NU HOLDINGS":"NU","CHARTER":"CHTR",
+    "LIBERTY FORMULA":"FWONK","VISA":"V","MASTERCARD":"MA",
+    "DIAGEO":"DEO","SNOWFLAKE":"SNOW","SIRIUS":"SIRI",
+    "HP INC":"HPQ","PARAMOUNT":"PARA","ALLY FINANCIAL":"ALLY",
+    "AON":"AON","LOUISIANA":"LPX",
+}
+
+@st.cache_data(ttl=86400*30, show_spinner=False)
+def fetch_berkshire_portfolio():
+    """SEC EDGAR에서 버크셔 최신 13F 포트폴리오 수집 (30일 캐시)"""
+    import requests, xml.etree.ElementTree as ET
+    headers = {"User-Agent": "StockApp ysj640@gmail.com"}
+    try:
+        subs = requests.get(
+            "https://data.sec.gov/submissions/CIK0001067983.json",
+            headers=headers, timeout=10).json()
+        recent = subs["filings"]["recent"]
+        acc_num = filed = None
+        for i, form in enumerate(recent["form"]):
+            if form == "13F-HR":
+                acc_num = recent["accessionNumber"][i]
+                filed = recent["filingDate"][i]; break
+        if not acc_num: return [], ""
+
+        acc_clean = acc_num.replace("-","")
+        idx = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/1067983/{acc_clean}/{acc_num}-index.json",
+            headers=headers, timeout=10).json()
+        xml_name = next(
+            (it["name"] for it in idx.get("directory",{}).get("item",[])
+             if "infotable" in it.get("name","").lower() and it["name"].endswith(".xml")), None)
+        if not xml_name: return [], filed
+
+        xml_text = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/1067983/{acc_clean}/{xml_name}",
+            headers=headers, timeout=15).text
+        root = ET.fromstring(xml_text)
+        p = root.tag.split("}")[0]+"}" if "{" in root.tag else ""
+
+        holdings=[]
+        for info in root.iter(f"{p}infoTable"):
+            name=(info.findtext(f"{p}nameOfIssuer") or "").strip()
+            val=(info.findtext(f"{p}value") or "0").replace(",","")
+            se=info.find(f"{p}shrsOrPrnAmt")
+            sh="0" if se is None else (se.findtext(f"{p}sshPrnamt") or "0").replace(",","")
+            try: vk,shares=int(val),int(sh)
+            except: continue
+            if vk<=0: continue
+            name_up=name.upper()
+            ticker=next((tk for kw,tk in _BRK_NAME_MAP.items() if kw in name_up),"")
+            holdings.append({"name":name,"ticker":ticker,"value_k":vk,"shares":shares})
+
+        holdings.sort(key=lambda x:x["value_k"],reverse=True)
+        total=sum(h["value_k"] for h in holdings)
+        for i,h in enumerate(holdings,1):
+            h["pct"]=round(h["value_k"]/total*100,2) if total else 0
+            h["rank"]=i
+        return holdings, filed
+    except Exception:
+        return [], ""
+
+def find_in_berkshire(ticker, company_name, holdings):
+    tk=ticker.replace(".KS","").replace(".KQ","").upper()
+    nm=company_name.upper()
+    for h in holdings:
+        if h.get("ticker")==tk: return h
+        hn=h["name"].upper()
+        if any(w in hn for w in nm.split() if len(w)>3): return h
+    return None
+
 IDX_LABELS={"SP500":"S&P 500","NASDAQ":"NASDAQ","KOSPI":"KOSPI","DJI":"Dow Jones"}
 IDX_COLORS={"SP500":"#E74C3C","NASDAQ":"#27AE60","KOSPI":"#F39C12","DJI":"#8E44AD"}
 WEEKDAY_KO={0:"월",1:"화",2:"수",3:"목",4:"금"}
@@ -651,6 +729,43 @@ if page == "📈 주가 분석":
                     st.markdown(f"{icon} {time_str}{pub_str}  \n&nbsp;&nbsp;&nbsp;&nbsp;{title_md}")
             else:
                 st.info("이 종목의 뉴스를 찾을 수 없습니다. (한국 주식은 뉴스가 제한될 수 있습니다)")
+
+            # ── 버크셔 해서웨이 포트폴리오
+            st.subheader("🏦 버크셔 해서웨이 포트폴리오")
+            with st.spinner("SEC EDGAR 13F 조회 중…"):
+                brk_holdings, brk_filed = fetch_berkshire_portfolio()
+
+            if brk_holdings:
+                brk_match = find_in_berkshire(ticker, name, brk_holdings)
+                if brk_match:
+                    # 버핏 보유 종목 → 예측값 추가 상향
+                    brk_boost = 1.02 if brk_match["rank"] <= 5 else (1.01 if brk_match["rank"] <= 15 else 1.005)
+                    future_fc = future_fc.copy()
+                    future_fc["yhat"]       *= brk_boost
+                    future_fc["yhat_lower"] *= brk_boost
+                    future_fc["yhat_upper"] *= brk_boost
+                    st.success(
+                        f"✅ **버핏 보유 종목!** — 포트폴리오 **{brk_match['rank']}위** ({brk_match['pct']:.2f}%)  \n"
+                        f"예측값에 버핏 신뢰도 **+{(brk_boost-1)*100:.1f}%** 추가 반영"
+                    )
+                    b1,b2,b3 = st.columns(3)
+                    b1.metric("포트폴리오 비중", f"{brk_match['pct']:.2f}%")
+                    b2.metric("보유 주식 수", f"{brk_match['shares']:,}주")
+                    b3.metric("평가액 (기준일)", f"${brk_match['value_k']*1000:,.0f}")
+                else:
+                    st.info("이 종목은 버크셔 해서웨이 포트폴리오에 없습니다.")
+
+                with st.expander(f"📋 버크셔 전체 포트폴리오 보기 (기준: {brk_filed})"):
+                    top_rows=[{"순위":h["rank"],"기업명":h["name"],
+                               "티커":h.get("ticker","-") or "-",
+                               "비중":f"{h['pct']:.2f}%",
+                               "평가액":f"${h['value_k']*1000:,.0f}",
+                               "보유주식":f"{h['shares']:,}주"}
+                              for h in brk_holdings[:30]]
+                    st.dataframe(pd.DataFrame(top_rows),use_container_width=True,hide_index=True)
+                st.caption(f"출처: SEC EDGAR 13F-HR | 기준일: {brk_filed} | 분기별 자동 갱신")
+            else:
+                st.warning("버크셔 포트폴리오 데이터를 불러올 수 없습니다. (SEC EDGAR 일시 불가)")
 
             # ── 예측 저장 버튼 (버튼 조건 밖에 위치 → 클릭 시 정상 실행됨)
             st.divider()
